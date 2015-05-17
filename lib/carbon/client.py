@@ -1,3 +1,6 @@
+from collections import deque
+from time import time
+
 from twisted.application.service import Service
 from twisted.internet import reactor
 from twisted.internet.defer import Deferred, DeferredList
@@ -5,9 +8,12 @@ from twisted.internet.protocol import ReconnectingClientFactory
 from twisted.protocols.basic import Int32StringReceiver
 from carbon.conf import settings
 from carbon.util import pickle
-from carbon import log, state, instrumentation
-from collections import deque
-from time import time
+from carbon import instrumentation, log, pipeline, state
+
+try:
+    import signal
+except ImportError:
+    log.debug("Couldn't import signal module")
 
 
 SEND_QUEUE_LOW_WATERMARK = settings.MAX_QUEUE_SIZE * settings.QUEUE_LOW_WATERMARK_PCT
@@ -24,7 +30,6 @@ class CarbonClientProtocol(Int32StringReceiver):
     self.destinationName = self.factory.destinationName
     self.queuedUntilReady = 'destinations.%s.queuedUntilReady' % self.destinationName
     self.sent = 'destinations.%s.sent' % self.destinationName
-    self.relayMaxQueueLength = 'destinations.%s.relayMaxQueueLength' % self.destinationName
     self.batchesSent = 'destinations.%s.batchesSent' % self.destinationName
 
     self.slowConnectionReset = 'destinations.%s.slowConnectionReset' % self.destinationName
@@ -88,7 +93,6 @@ class CarbonClientProtocol(Int32StringReceiver):
     chained_invocation_delay = 0.0001
     queueSize = self.factory.queueSize
 
-    instrumentation.max(self.relayMaxQueueLength, queueSize)
     if self.paused:
       instrumentation.max(self.queuedUntilReady, queueSize)
       return
@@ -179,6 +183,8 @@ class CarbonClientFactory(ReconnectingClientFactory):
     self.attemptedRelays = 'destinations.%s.attemptedRelays' % self.destinationName
     self.fullQueueDrops = 'destinations.%s.fullQueueDrops' % self.destinationName
     self.queuedUntilConnected = 'destinations.%s.queuedUntilConnected' % self.destinationName
+    self.relayMaxQueueLength = 'destinations.%s.relayMaxQueueLength' % self.destinationName
+
   def queueFullCallback(self, result):
     state.events.cacheFull()
     log.clients('%s send queue is full (%d datapoints)' % (self, result))
@@ -246,6 +252,7 @@ class CarbonClientFactory(ReconnectingClientFactory):
 
   def sendDatapoint(self, metric, datapoint):
     instrumentation.increment(self.attemptedRelays)
+    instrumentation.max(self.relayMaxQueueLength, self.queueSize)
     if self.queueSize >= settings.MAX_QUEUE_SIZE:
       if not self.queueFull.called:
         self.queueFull.callback(self.queueSize)
@@ -318,6 +325,9 @@ class CarbonClientManager(Service):
     self.client_factories = {} # { destination : CarbonClientFactory() }
 
   def startService(self):
+    if 'signal' in globals().keys():
+      log.debug("Installing SIG_IGN for SIGHUP")
+      signal.signal(signal.SIGHUP, signal.SIG_IGN)
     Service.startService(self)
     for factory in self.client_factories.values():
       if not factory.started:
@@ -375,3 +385,11 @@ class CarbonClientManager(Service):
 
   def __str__(self):
     return "<%s[%x]>" % (self.__class__.__name__, id(self))
+
+
+class RelayProcessor(pipeline.Processor):
+  plugin_name = 'relay'
+
+  def process(self, metric, datapoint):
+    state.client_manager.sendDatapoint(metric, datapoint)
+    return pipeline.Processor.NO_OUTPUT

@@ -43,7 +43,7 @@ defaults = dict(
   CACHE_QUERY_INTERFACE='0.0.0.0',
   CACHE_QUERY_PORT=7002,
   LOG_UPDATES=True,
-  LOG_CACHE_HITS = True,
+  LOG_CACHE_HITS=True,
   WHISPER_AUTOFLUSH=False,
   WHISPER_SPARSE_CREATE=False,
   WHISPER_FALLOCATE_CREATE=False,
@@ -51,8 +51,8 @@ defaults = dict(
   MAX_DATAPOINTS_PER_MESSAGE=500,
   MAX_AGGREGATION_INTERVALS=5,
   MAX_QUEUE_SIZE=1000,
-  QUEUE_LOW_WATERMARK_PCT = 0.8,
-  TIME_TO_DEFER_SENDING = 0.0001,
+  QUEUE_LOW_WATERMARK_PCT=0.8,
+  TIME_TO_DEFER_SENDING=0.0001,
   ENABLE_AMQP=False,
   AMQP_VERBOSE=False,
   BIND_PATTERNS=['#'],
@@ -69,12 +69,18 @@ defaults = dict(
   USE_WHITELIST=False,
   CARBON_METRIC_PREFIX='carbon',
   CARBON_METRIC_INTERVAL=60,
+  CACHE_WRITE_STRATEGY='sorted',
   WRITE_BACK_FREQUENCY=None,
   MIN_RESET_STAT_FLOW=1000,
   MIN_RESET_RATIO=0.9,
   MIN_RESET_INTERVAL=121,
   USE_RATIO_RESET=False,
   LOG_LISTENER_CONN_SUCCESS=True,
+  LOG_AGGREGATOR_MISSES=True,
+  AGGREGATION_RULES='aggregation-rules.conf',
+  REWRITE_RULES='rewrite-rules.conf',
+  RELAY_RULES='relay-rules.conf',
+  ENABLE_LOGROTATE=True,
 )
 
 
@@ -154,10 +160,10 @@ class Settings(dict):
         # Attempt to figure out numeric types automatically
         try:
           value = int(value)
-        except:
+        except ValueError:
           try:
             value = float(value)
-          except:
+          except ValueError:
             pass
 
       self[key] = value
@@ -202,6 +208,14 @@ class CarbonCacheOptions(usage.Options):
         program_settings = read_config(program, self)
         settings.update(program_settings)
         settings["program"] = program
+
+        # Normalize and expand paths
+        settings["STORAGE_DIR"] = os.path.normpath(os.path.expanduser(settings["STORAGE_DIR"]))
+        settings["LOCAL_DATA_DIR"] = os.path.normpath(os.path.expanduser(settings["LOCAL_DATA_DIR"]))
+        settings["WHITELISTS_DIR"] = os.path.normpath(os.path.expanduser(settings["WHITELISTS_DIR"]))
+        settings["PID_DIR"] = os.path.normpath(os.path.expanduser(settings["PID_DIR"]))
+        settings["LOG_DIR"] = os.path.normpath(os.path.expanduser(settings["LOG_DIR"]))
+        settings["pidfile"] = os.path.normpath(os.path.expanduser(settings["pidfile"]))
 
         # Set process uid/gid by changing the parent config, if a user was
         # provided in the configuration file.
@@ -248,7 +262,7 @@ class CarbonCacheOptions(usage.Options):
             elif not self.parent["nodaemon"]:
                 logdir = settings.LOG_DIR
                 if not isdir(logdir):
-                    os.mkdir(logdir)
+                    os.makedirs(logdir)
                     if settings.USER:
                         # We have not yet switched to the specified user,
                         # but that user must be able to create files in this
@@ -291,7 +305,7 @@ class CarbonCacheOptions(usage.Options):
             try:
                 pid = int(pf.read().strip())
                 pf.close()
-            except:
+            except IOError:
                 print "Could not read pidfile %s" % pidfile
                 raise SystemExit(1)
             print "Sending kill signal to pid %d" % pid
@@ -313,7 +327,7 @@ class CarbonCacheOptions(usage.Options):
             try:
                 pid = int(pf.read().strip())
                 pf.close()
-            except:
+            except IOError:
                 print "Failed to read pid from %s" % pidfile
                 raise SystemExit(1)
 
@@ -331,7 +345,7 @@ class CarbonCacheOptions(usage.Options):
                 try:
                     pid = int(pf.read().strip())
                     pf.close()
-                except:
+                except IOError:
                     print "Could not read pidfile %s" % pidfile
                     raise SystemExit(1)
                 if _process_alive(pid):
@@ -342,8 +356,20 @@ class CarbonCacheOptions(usage.Options):
                     print "Removing stale pidfile %s" % pidfile
                     try:
                         os.unlink(pidfile)
-                    except:
+                    except IOError:
                         print "Could not remove pidfile %s" % pidfile
+            # Try to create the PID directory
+            else:
+                if not os.path.exists(settings["PID_DIR"]):
+                    try:
+                        os.makedirs(settings["PID_DIR"])
+                    except OSError as exc: # Python >2.5
+                        if exc.errno == errno.EEXIST and os.path.isdir(settings["PID_DIR"]):
+                           pass
+                        else:
+                           raise
+
+
 
             print "Starting %s (instance %s)" % (program, instance)
 
@@ -363,12 +389,12 @@ class CarbonAggregatorOptions(CarbonCacheOptions):
     def postOptions(self):
         CarbonCacheOptions.postOptions(self)
         if self["rules"] is None:
-            self["rules"] = join(settings["CONF_DIR"], "aggregation-rules.conf")
+            self["rules"] = join(settings["CONF_DIR"], settings['AGGREGATION_RULES'])
         settings["aggregation-rules"] = self["rules"]
 
         if self["rewrite-rules"] is None:
             self["rewrite-rules"] = join(settings["CONF_DIR"],
-                                         "rewrite-rules.conf")
+                                         settings['REWRITE_RULES'])
         settings["rewrite-rules"] = self["rewrite-rules"]
 
 
@@ -382,12 +408,12 @@ class CarbonRelayOptions(CarbonCacheOptions):
     def postOptions(self):
         CarbonCacheOptions.postOptions(self)
         if self["rules"] is None:
-            self["rules"] = join(settings["CONF_DIR"], "relay-rules.conf")
+            self["rules"] = join(settings["CONF_DIR"], settings['RELAY_RULES'])
         settings["relay-rules"] = self["rules"]
 
         if self["aggregation-rules"] is None:
-          self["aggregation-rules"] = join(settings["CONF_DIR"], "aggregation-rules.conf")
-        settings["aggregation-rules"] = self["aggregation-rules"]
+            self["rules"] = join(settings["CONF_DIR"], settings['AGGREGATION_RULES'])
+        settings["aggregation-rules"] = self["rules"]
 
         if settings["RELAY_METHOD"] not in ("rules", "consistent-hashing", "aggregated-consistent-hashing", "remove-node-consistent-hashing"):
             print ("In carbon.conf, RELAY_METHOD must be either 'rules' or "
