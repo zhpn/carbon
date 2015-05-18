@@ -50,6 +50,7 @@ defaults = dict(
   WHISPER_LOCK_WRITES=False,
   MAX_DATAPOINTS_PER_MESSAGE=500,
   MAX_AGGREGATION_INTERVALS=5,
+  FORWARD_ALL=False,
   MAX_QUEUE_SIZE=1000,
   QUEUE_LOW_WATERMARK_PCT=0.8,
   TIME_TO_DEFER_SENDING=0.0001,
@@ -383,14 +384,34 @@ class CarbonAggregatorOptions(CarbonCacheOptions):
 
     optParameters = [
         ["rules", "", None, "Use the given aggregation rules file."],
+        ["sumall-rules", "", None, "Use the given aggregation sumall rules file."],
         ["rewrite-rules", "", None, "Use the given rewrite rules file."],
         ] + CarbonCacheOptions.optParameters
 
+    def parseAggregationSumallRules(self):
+        nsDict = {}
+        section = "NameSpaces"
+        config = ConfigParser()
+        config.read(self["sumall-rules"])
+        nameSpaces = config.options(section)
+        for nameSpace in nameSpaces:
+            try:
+                nsDict[nameSpace] = config.get(section, nameSpace)
+                if nsDict[nameSpace] == -1:
+                    nsDict[nameSpace] = None
+            except:
+                print("exception on %s!" % self["sumall-rules"])
+                nsDict[nameSpace] = None
+        return nsDict
     def postOptions(self):
         CarbonCacheOptions.postOptions(self)
         if self["rules"] is None:
             self["rules"] = join(settings["CONF_DIR"], settings['AGGREGATION_RULES'])
         settings["aggregation-rules"] = self["rules"]
+
+        if self["sumall-rules"] is None:
+            self["sumall-rules"] = join(settings["CONF_DIR"], "aggregation-sumall-rules.conf")
+        settings["aggregation-sumall-rules"] = self.parseAggregationSumallRules()
 
         if self["rewrite-rules"] is None:
             self["rewrite-rules"] = join(settings["CONF_DIR"],

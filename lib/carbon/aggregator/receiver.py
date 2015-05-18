@@ -31,20 +31,25 @@ def process(metric, datapoint):
   # Custom rule to sum metrics
   elif settings.AGGREGATOR_RULE_METHOD == "sumall":
     sum_index = metric.find(".sum.")
+    metric_namespace = metric[:metric.find(".")]
+    nsDict = settings["aggregation-sumall-rules"]
     if sum_index != -1:
       aggregate_metric = metric[:sum_index] + ".sum_all.hosts"
       aggregate_metrics.append(aggregate_metric)
-
       buffer = BufferManager.get_buffer(aggregate_metric)
+      aggregate_time_interval = 60
+
+      if metric_namespace in nsDict:
+          aggregate_time_interval = int(nsDict[metric_namespace])
 
       if not buffer.configured:
-        buffer.configure_aggregation(60, sum)
+        buffer.configure_aggregation(aggregate_time_interval, sum)
 
       buffer.input(datapoint)
 
   for rule in RewriteRuleManager.postRules:
     metric = rule.apply(metric)
 
-  if metric not in aggregate_metrics:
+  if settings['FORWARD_ALL'] and metric not in aggregate_metrics:
     #log.msg("Couldn't match metric %s with any aggregation rule. Passing on un-aggregated." % metric)
     events.metricGenerated(metric, datapoint)
